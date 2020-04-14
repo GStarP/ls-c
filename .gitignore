@@ -1,3 +1,4 @@
-ls.o
-my_ls
+*.o
+mls
+mwc
 .vscode
