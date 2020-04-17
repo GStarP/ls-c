@@ -11,13 +11,14 @@
 #include <fcntl.h>
 
 #define MAX_FILE_NAME 50
-#define MAX_DIR_FILES 20
+#define MAX_DIR_FILES 30
 #define MAX_ATTR_NAME 30
 #define R 0
 #define D 1
 #define A 2
 #define I 3
 #define L 4
+#define RE 5
 
 void chooseFile(char* des, char* name, long ino, struct stat* file, int* opts);
 void printFile(char* name, long ino, struct stat* file, int* opts);
@@ -46,21 +47,93 @@ void getSupDir(char* path, char* des) {
         }
     }
 }
+void sort(int filesNum, struct stat** files, char fileNames[MAX_DIR_FILES][MAX_FILE_NAME], long* fileInos) {
+    // 根据对 ls 的测试，输出应按照文件名字典序排序
+    // . ..
+    for (int i = 0; i < filesNum; ++i) {
+        if (strcmp(fileNames[i], ".") == 0 && i != 0) {
+            swapFile(files[i], files[0]);
+            swapName(fileNames[i], fileNames[0]);
+            long tmp = fileInos[i];
+            fileInos[i] = fileInos[0];
+            fileInos[0] = fileInos[i];
+        }
+        if (strcmp(fileNames[i], "..") == 0 && i != 1) {
+            swapFile(files[i], files[1]);
+            swapName(fileNames[i], fileNames[1]);
+            long tmp = fileInos[i];
+            fileInos[i] = fileInos[1];
+            fileInos[1] = fileInos[i];
+        }
+    }
+    // 对其它文件进行排序
+    for (int i = 2; i < filesNum; ++i) {
+        int idx = i;
+        for (int j = i + 1; j < filesNum; ++j) {
+            int bias1 = fileNames[idx][0] == '.' ? 1 : 0;
+            int bias2 = fileNames[j][0] == '.' ? 1 : 0;
+            if (strcmp(fileNames[idx] + bias1, fileNames[j] + bias2) > 0) {
+                idx = j;
+            }
+        }
+        if (idx != i) {
+            swapFile(files[idx], files[i]);
+            swapName(fileNames[idx], fileNames[i]);
+            long tmp = fileInos[i];
+            fileInos[i] = fileInos[idx];
+            fileInos[idx] = tmp;
+        }
+    }
+}
+int collectSubDir(int subDirNum, char subDirPaths[MAX_DIR_FILES][MAX_FILE_NAME], char* curPath) {
+    char nextPath[MAX_FILE_NAME];
+    strcpy(nextPath, curPath);
+    int bias = strlen(curPath);
+    nextPath[bias] = '/';
+
+    DIR* curDir = opendir(curPath);
+    if (curDir == NULL) {
+        printf("open dir error: %s\n", curPath);
+    } else {
+        strcpy(subDirPaths[subDirNum], curPath);
+        subDirNum++;
+        struct dirent* curFile = (struct dirent*) malloc(sizeof(struct dirent));
+        while ((curFile = readdir(curDir)) != NULL) {
+            strcpy(nextPath + bias + 1, curFile->d_name);
+            if (strcmp(curFile->d_name, ".") != 0 && strcmp(curFile->d_name, "..") != 0) {
+                strcpy(subDirPaths[subDirNum], nextPath);
+                struct stat* entry = (struct stat*) malloc(sizeof(struct stat));
+                int ok = lstat(nextPath, entry);
+                if (ok == -1) {
+                    printf("lstat error: %s\n", nextPath);
+                } else {
+                    if (S_ISDIR(entry->st_mode)) {
+                        subDirNum = collectSubDir(subDirNum, subDirPaths, nextPath);
+                    }
+                }
+            }
+        }
+        free(curFile);
+    }
+    closedir(curDir);
+    return subDirNum;
+}
 
 void main(int argc, char* argv[]) {
     // 初始化参数列表
-    char optStr[5];
+    char optStr[6];
     optStr[R] = 'r';
     optStr[D] = 'd';
     optStr[A] = 'a';
     optStr[I] = 'i';
     optStr[L] = 'l';
-    int opts[5];
-    for (int i = 0; i < 5; ++i) opts[i] = 0;
+    optStr[RE] = 'R';
+    int opts[6];
+    for (int i = 0; i < 6; ++i) opts[i] = 0;
 
     // 解析参数
     for (int i = 1; i < argc - 1; ++i) {
-        for (int j = 0; j < 5; ++j) {
+        for (int j = 0; j < 6; ++j) {
             char* op = argv[i];
             if (op[strlen(op) - 1] == optStr[j]) {
                 opts[j] = 1;
@@ -72,7 +145,7 @@ void main(int argc, char* argv[]) {
     char dirPath[MAX_FILE_NAME];
     // 默认路径为当前工作目录
     if (lastOpt[0] == '-') {
-        for (int j = 0; j < 5; ++j) {
+        for (int j = 0; j < 6; ++j) {
             if (lastOpt[strlen(lastOpt) - 1] == optStr[j]) {
                 opts[j] = 1;
             }
@@ -91,6 +164,9 @@ void main(int argc, char* argv[]) {
     for (int i = 0; i < MAX_DIR_FILES; ++i) {
         *(files + i) = (struct stat*) malloc(sizeof(struct stat));
     }
+    // 记录递归目录路径的数组
+    int subDirNum = 0;
+    char subDirPaths[MAX_DIR_FILES][MAX_FILE_NAME];
 
     // 读取文件信息
     struct stat* entry = (struct stat*) malloc(sizeof(struct stat));
@@ -120,47 +196,26 @@ void main(int argc, char* argv[]) {
                         memcpy(files[file_idx], entry, sizeof(struct stat));
                         file_idx++;
                         filesNum++;
+                        // 需要递归收集全部子目录
+                        if (opts[RE] == 1 && opts[D] != 1 && S_ISDIR(entry->st_mode) == 1 && strcmp(curFile->d_name, ".") != 0 && strcmp(curFile->d_name, "..") != 0) {
+                            char tmp[MAX_FILE_NAME];
+                            strcpy(tmp, dirPath);
+                            tmp[strlen(dirPath)] = '/';
+                            strcpy(tmp + strlen(dirPath) + 1, curFile->d_name);
+                            chdir("..");
+                            subDirNum = collectSubDir(subDirNum, subDirPaths, tmp);
+                        }
                     }
                 }
                 free(curFile);
             }
             closedir(dir);
             
-            // 根据对 ls 的测试，输出应按照文件名字典序排序
-            // . ..
-            for (int i = 0; i < filesNum; ++i) {
-                if (strcmp(fileNames[i], ".") == 0 && i != 0) {
-                    swapFile(files[i], files[0]);
-                    swapName(fileNames[i], fileNames[0]);
-                    long tmp = fileInos[i];
-                    fileInos[i] = fileInos[0];
-                    fileInos[0] = fileInos[i];
-                }
-                if (strcmp(fileNames[i], "..") == 0 && i != 1) {
-                    swapFile(files[i], files[1]);
-                    swapName(fileNames[i], fileNames[1]);
-                    long tmp = fileInos[i];
-                    fileInos[i] = fileInos[1];
-                    fileInos[1] = fileInos[i];
-                }
-            }
-            //
-            for (int i = 2; i < filesNum; ++i) {
-                int idx = i;
-                for (int j = i + 1; j < filesNum; ++j) {
-                    int bias1 = fileNames[idx][0] == '.' ? 1 : 0;
-                    int bias2 = fileNames[j][0] == '.' ? 1 : 0;
-                    if (strcmp(fileNames[idx] + bias1, fileNames[j] + bias2) > 0) {
-                        idx = j;
-                    }
-                }
-                if (idx != i) {
-                    swapFile(files[idx], files[i]);
-                    swapName(fileNames[idx], fileNames[i]);
-                    long tmp = fileInos[i];
-                    fileInos[i] = fileInos[idx];
-                    fileInos[idx] = tmp;
-                }
+            sort(filesNum, files, fileNames, fileInos);
+
+            // R 和 d 同时存在时 d 优先级更高
+            if (opts[RE] == 1 && opts[D] != 1) {
+                printf("%s:\n", dirPath);
             }
 
             // 根据参数 r 决定输出顺序
@@ -173,6 +228,51 @@ void main(int argc, char* argv[]) {
                     chooseFile(dirPath, fileNames[i], fileInos[i], files[i], opts);
                 }
             }
+
+            if (opts[RE] == 1 && opts[D] != 1) {
+                printf("\n");
+                chdir(dirPath);
+                chdir("..");
+                for (int k = 0; k < subDirNum; ++k) {
+                    filesNum = 0;
+                    DIR* dir = opendir(subDirPaths[k]);
+                    if (dir == NULL) {
+                        printf("open dir err: %s\n", subDirPaths[k]);
+                    } else {
+                        struct dirent* curFile = (struct dirent*) malloc(sizeof(struct dirent));
+                        int file_idx = 0;
+                        while((curFile = readdir(dir)) != NULL) {
+                            chdir(subDirPaths[k]);
+                            ok = lstat(curFile->d_name, entry);
+                            if (ok == -1) {
+                                printf("lstat error: %s\n", curFile->d_name);
+                            } else {
+                                strcpy(fileNames[file_idx], curFile->d_name);
+                                fileInos[file_idx] = curFile->d_ino;
+                                memcpy(files[file_idx], entry, sizeof(struct stat));
+                                file_idx++;
+                                filesNum++;
+                            }
+                        }
+                        free(curFile);
+                    }
+                    closedir(dir);
+                    
+                    sort(filesNum, files, fileNames, fileInos);
+
+                    printf("%s:\n", subDirPaths[k]);
+                    if (opts[R] == 1) {
+                        for (int i = filesNum - 1; i >= 0; --i) {
+                            chooseFile(dirPath, fileNames[i], fileInos[i], files[i], opts);
+                        }
+                    } else {
+                        for (int i = 0; i < filesNum; ++i) {
+                            chooseFile(dirPath, fileNames[i], fileInos[i], files[i], opts);
+                        }
+                    }
+                }
+            }
+
         // 当目标路径是文件时，直接读取并存储
         } else {
             ok = lstat(dirPath, entry);
